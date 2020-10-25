@@ -274,17 +274,27 @@ test_doc_spine (const char *path)
 }
 
 static void
+print_doc_toc_recursive(GepubDoc *doc, GList *nav)
+{
+    while (nav && nav->data) {
+        GepubNavPoint *point = (GepubNavPoint*)nav->data;
+        PTEST ("%02d: %s -> %s\n", (gint)point->playorder, point->label, point->content);
+        PTEST (" -> Chapter: %d\n", gepub_doc_resource_uri_to_chapter (doc, point->content));
+        if (point->children)
+        {
+            print_doc_toc_recursive(doc, point->children);
+        }
+        nav = nav->next;
+    }
+}
+
+static void
 test_doc_toc (const char *path)
 {
     GepubDoc *doc = gepub_doc_new (path, NULL);
 
     GList *nav = gepub_doc_get_toc (doc);
-    while (nav && nav->data) {
-        GepubNavPoint *point = (GepubNavPoint*)nav->data;
-        PTEST ("%02d: %s -> %s\n", (gint)point->playorder, point->label, point->content);
-        PTEST (" -> Chapter: %d\n", gepub_doc_resource_uri_to_chapter (doc, point->content));
-        nav = nav->next;
-    }
+    print_doc_toc_recursive(doc, nav);
 
     g_object_unref (G_OBJECT (doc));
 }
