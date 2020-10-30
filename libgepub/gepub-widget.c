@@ -31,6 +31,7 @@ struct _GepubWidget {
     gboolean paginate;
     gint chapter_length; // real chapter length
     gint chapter_pos; // position in the chapter, a percentage based on chapter_length
+    gchar *chapter_href;
     gint length;
     gint init_chapter_pos;
     gint margin; // lateral margin in px
@@ -61,7 +62,16 @@ G_DEFINE_TYPE (GepubWidget, gepub_widget, WEBKIT_TYPE_WEB_VIEW)
 
 static void
 scroll_to_chapter_pos (GepubWidget *widget) {
-    gchar *script = g_strdup_printf("document.querySelector('body').scrollTo(%d, 0)", widget->chapter_pos);
+    gchar *script = g_strdup_printf("window.scrollTo(%d, 0)", widget->chapter_pos);
+    printf("scrolling --> %s\n", script);
+    webkit_web_view_run_javascript (WEBKIT_WEB_VIEW (widget), script, NULL, NULL, NULL);
+    g_free(script);
+}
+
+static void
+scroll_to_chapter_href (GepubWidget *widget) {
+    gchar *script = g_strdup_printf("document.querySelector('#%s').scrollIntoView()", widget->chapter_href);
+    printf("%s: %s\n", __FUNCTION__, script);
     webkit_web_view_run_javascript (WEBKIT_WEB_VIEW (widget), script, NULL, NULL, NULL);
     g_free(script);
 }
@@ -118,10 +128,14 @@ pagination_initialize_finished (GObject      *object,
         if (widget->chapter_pos) {
             adjust_chapter_pos (widget);
         }
+        if (widget->chapter_href) {
+            scroll_to_chapter_href (widget);
+        }
     } else {
         g_warning ("Error running javascript: unexpected return value");
     }
     webkit_javascript_result_unref (js_result);
+    printf("pagination callback finished\n");
 }
 
 static void
@@ -221,7 +235,8 @@ reload_length_cb (GtkWidget *widget,
                 "document.body.style.columnWidth = window.innerWidth+'px';"
                 "document.body.style.height = (window.innerHeight - 40) +'px';"
                 "document.body.style.columnGap = '0px';"
-                "document.body.scrollWidth",
+                //"document.body.style.border = '3px solid red';"
+                "document.body.scrollWidth;",
                 NULL, pagination_initialize_finished, (gpointer)widget);
     }
 }
@@ -240,6 +255,7 @@ set_current_chapter_by_uri (WebKitWebView  *web_view)
     if (g_strcmp0 ("about:blank", uri_string)) {
         uri = soup_uri_new (uri_string);
         path = soup_uri_get_path (uri);
+        printf("%s: path = %s\n", __FUNCTION__, path);
         chapter = gepub_doc_resource_uri_to_chapter (widget->doc, path);
         gepub_doc_set_chapter (widget->doc, chapter);
         soup_uri_free (uri);
@@ -380,6 +396,7 @@ gepub_widget_init (GepubWidget *widget)
     widget->chapter_length = 0;
     widget->paginate = FALSE;
     widget->chapter_pos = 0;
+    widget->chapter_href = '\0';
     widget->length = 0;
     widget->init_chapter_pos = 0;
     widget->margin = 20;
@@ -576,6 +593,19 @@ gepub_widget_get_n_chapters (GepubWidget *widget)
 }
 
 /**
+ * gepub_widget_get_n_chapters_virtual:
+ * @widget: a #GepubWidget
+ *
+ * Returns: the number of virtual chapters in the document
+ */
+gint
+gepub_widget_get_n_chapters_virtual (GepubWidget *widget)
+{
+    g_return_val_if_fail (GEPUB_IS_DOC (widget->doc), 0);
+    return gepub_doc_get_n_chapters_virtual (widget->doc);
+}
+
+/**
  * gepub_widget_get_chapter:
  * @widget: a #GepubWidget
  *
@@ -586,6 +616,19 @@ gepub_widget_get_chapter (GepubWidget *widget)
 {
     g_return_val_if_fail (GEPUB_IS_DOC (widget->doc), 0);
     return gepub_doc_get_chapter (widget->doc);
+}
+
+/**
+ * gepub_widget_get_chapter_virtual:
+ * @widget: a #GepubWidget
+ *
+ * Returns: the current chapter in the document
+ */
+gint
+gepub_widget_get_chapter_virtual (GepubWidget *widget)
+{
+    g_return_val_if_fail (GEPUB_IS_DOC (widget->doc), 0);
+    return gepub_doc_get_chapter_virtual (widget->doc);
 }
 
 /**
@@ -602,6 +645,21 @@ gepub_widget_get_chapter_length (GepubWidget *widget)
 }
 
 /**
+ * gepub_widget_set_chapter_virtual:
+ * @widget: a #GepubWidget
+ * @index: the new chapter
+ *
+ * Sets the current chapter in the doc
+ */
+void
+gepub_widget_set_chapter_virtual (GepubWidget *widget,
+                                  gint         index)
+{
+    g_return_if_fail (GEPUB_IS_DOC (widget->doc));
+    return gepub_doc_set_chapter_virtual (widget->doc, index);
+}
+
+/**
  * gepub_widget_set_chapter:
  * @widget: a #GepubWidget
  * @index: the new chapter
@@ -614,6 +672,31 @@ gepub_widget_set_chapter (GepubWidget *widget,
 {
     g_return_if_fail (GEPUB_IS_DOC (widget->doc));
     return gepub_doc_set_chapter (widget->doc, index);
+}
+
+/**
+ * gepub_widget_set_chapter_href:
+ * @widget: a #GepubWidget
+ * @index: the new chapter
+ * @href: the header inside the chapter
+ *
+ * Sets the current chapter in the doc and jumps to the @href inside of it
+ */
+void
+gepub_widget_set_chapter_href (GepubWidget *widget,
+                               gint index,
+                               const gchar* href)
+{
+    g_return_if_fail (GEPUB_IS_DOC (widget->doc));
+
+    gepub_widget_set_chapter (widget, index);
+    widget->chapter_href = g_strdup(href);
+    printf("%s chapter %d href %s\n", __FUNCTION__, gepub_doc_get_chapter(widget->doc), href);
+    scroll_to_chapter_href (widget);
+    // adjust_chapter_pos (widget);
+
+    g_object_notify_by_pspec (G_OBJECT (widget), properties[PROP_CHAPTER_POS]);
+    // return TRUE;
 }
 
 /**
@@ -640,6 +723,32 @@ gepub_widget_chapter_prev (GepubWidget *widget)
 {
     g_return_val_if_fail (GEPUB_IS_DOC (widget->doc), FALSE);
     return gepub_doc_go_prev (widget->doc);
+}
+
+/**
+ * gepub_widget_chapter_next_virtual:
+ * @widget: a #GepubWidget
+ *
+ * Returns: TRUE on success, FALSE if there's no next chapter
+ */
+gboolean
+gepub_widget_chapter_next_virtual (GepubWidget *widget)
+{
+    g_return_val_if_fail (GEPUB_IS_DOC (widget->doc), FALSE);
+    return gepub_doc_go_next_virtual (widget->doc);
+}
+
+/**
+ * gepub_widget_chapter_prev_virtual:
+ * @widget: a #GepubWidget
+ *
+ * Returns: TRUE on success, FALSE if there's no prev chapter
+ */
+gboolean
+gepub_widget_chapter_prev_virtual (GepubWidget *widget)
+{
+    g_return_val_if_fail (GEPUB_IS_DOC (widget->doc), FALSE);
+    return gepub_doc_go_prev_virtual (widget->doc);
 }
 
 /**

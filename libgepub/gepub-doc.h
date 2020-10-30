@@ -43,7 +43,11 @@ struct _GepubResource {
 struct _GepubNavPoint {
     gchar *label;
     gchar *content;
+    gchar *params;
     guint64 playorder;
+    gint chapter;
+
+    GList *parent;
     GList *children;
 };
 
@@ -75,6 +79,13 @@ gboolean          gepub_doc_go_prev                         (GepubDoc *doc);
 gint              gepub_doc_get_n_chapters                  (GepubDoc *doc);
 gint              gepub_doc_get_chapter                     (GepubDoc *doc);
 void              gepub_doc_set_chapter                     (GepubDoc *doc,
+                                                             gint      index);
+
+gboolean          gepub_doc_go_next_virtual                 (GepubDoc *doc);
+gboolean          gepub_doc_go_prev_virtual                 (GepubDoc *doc);
+gint              gepub_doc_get_n_chapters_virtual          (GepubDoc *doc);
+gint              gepub_doc_get_chapter_virtual             (GepubDoc *doc);
+void              gepub_doc_set_chapter_virtual             (GepubDoc *doc,
                                                              gint      index);
 
 GList            *gepub_doc_get_toc                         (GepubDoc *doc);

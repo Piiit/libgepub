@@ -54,7 +54,7 @@ static void gepub_doc_fill_spine (GepubDoc *doc);
 static void gepub_doc_fill_toc (GepubDoc *doc, gchar *toc_id);
 static void gepub_doc_initable_iface_init (GInitableIface *iface);
 static gint navpoint_compare (GepubNavPoint *a, GepubNavPoint *b);
-static GepubNavPoint *gepub_parse_navpoint (xmlNodePtr node, const gchar *basepath);
+static GepubNavPoint *gepub_parse_navpoint (GepubDoc *doc, xmlNodePtr node, guint64 *playorder);
 
 struct _GepubDoc {
     GObject parent;
@@ -65,9 +65,12 @@ struct _GepubDoc {
     gchar *path;
     GHashTable *resources;
 
-    GList *spine;
-    GList *chapter;
-    GList *toc;
+    GList *spine;                       // List of string IDs
+    GList *chapter;                     // Pointer to GebubDoc::spine
+
+    GList *toc;                         // List of nested GepubNavPoints
+    GList *toc_flat;                    // List of flat GepubNavPoints
+    GList *toc_flat_chapter_virtual;    // Pointer to #toc_flat
 };
 
 struct _GepubDocClass {
@@ -78,6 +81,7 @@ enum {
     PROP_0,
     PROP_PATH,
     PROP_CHAPTER,
+    PROP_CHAPTER_VIRTUAL,
     NUM_PROPS
 };
 
@@ -129,6 +133,9 @@ gepub_doc_set_property (GObject      *object,
     case PROP_CHAPTER:
         gepub_doc_set_chapter (doc, g_value_get_int (value));
         break;
+    case PROP_CHAPTER_VIRTUAL:
+        gepub_doc_set_chapter_virtual (doc, g_value_get_int (value));
+        break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
         break;
@@ -149,6 +156,9 @@ gepub_doc_get_property (GObject    *object,
         break;
     case PROP_CHAPTER:
         g_value_set_int (value, gepub_doc_get_chapter (doc));
+        break;
+    case PROP_CHAPTER_VIRTUAL:
+        g_value_set_int (value, gepub_doc_get_chapter_virtual (doc));
         break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -189,6 +199,14 @@ gepub_doc_class_init (GepubDocClass *klass)
         g_param_spec_int ("chapter",
                           "Current chapter",
                           "The current chapter index",
+                          -1, G_MAXINT, 0,
+                          G_PARAM_READWRITE |
+                          G_PARAM_STATIC_STRINGS);
+
+    properties[PROP_CHAPTER_VIRTUAL] =
+        g_param_spec_int ("chaptervirtual",
+                          "Current virtual chapter seen by the reader",
+                          "The current playorder index",
                           -1, G_MAXINT, 0,
                           G_PARAM_READWRITE |
                           G_PARAM_STATIC_STRINGS);
@@ -324,12 +342,6 @@ gepub_doc_fill_spine (GepubDoc *doc)
     root_element = xmlDocGetRootElement (xdoc);
     snode = gepub_utils_get_element_by_tag (root_element, "spine");
 
-    toc = gepub_utils_get_prop (snode, "toc");
-    if (toc) {
-        gepub_doc_fill_toc (doc, toc);
-        g_free (toc);
-    }
-
     item = snode->children;
     while (item) {
         if (item->type != XML_ELEMENT_NODE ) {
@@ -345,6 +357,12 @@ gepub_doc_fill_spine (GepubDoc *doc)
 
     doc->spine = g_list_reverse (spine);
     doc->chapter = doc->spine;
+
+    toc = gepub_utils_get_prop (snode, "toc");
+    if (toc) {
+        gepub_doc_fill_toc (doc, toc);
+        g_free (toc);
+    }
 
     xmlFreeDoc (xdoc);
 }
@@ -365,9 +383,12 @@ gepub_doc_fill_toc (GepubDoc *doc, gchar *toc_id)
     const char *data;
     gsize size;
     GList *toc = NULL;
+    GList *toc_flat = NULL;
     GBytes *toc_data = NULL;
+    guint64 playorder = 0;
 
     doc->toc = toc;
+    doc->toc_flat = toc_flat;
 
     toc_data = gepub_doc_get_resource_by_id (doc, toc_id);
     if (!toc_data) {
@@ -391,19 +412,22 @@ gepub_doc_fill_toc (GepubDoc *doc, gchar *toc_id)
             continue;
         }
 
-        navpoint = gepub_parse_navpoint(item, doc->content_base);
+        navpoint = gepub_parse_navpoint(doc, item, &playorder);
         toc = g_list_prepend (toc, navpoint);
+        toc_flat = g_list_prepend (toc_flat, navpoint);
         item = item->next;
     }
 
     doc->toc = g_list_sort (toc, (GCompareFunc) navpoint_compare);
+    doc->toc_flat = g_list_sort (toc_flat, (GCompareFunc) navpoint_compare);
+    doc->toc_flat_chapter_virtual = doc->toc_flat;
 
     xmlFreeDoc (xdoc);
     g_bytes_unref (toc_data);
 }
 
 static GepubNavPoint *
-gepub_parse_navpoint (xmlNodePtr node, const gchar *basepath)
+gepub_parse_navpoint (GepubDoc *doc, xmlNodePtr node, guint64 *playorder)
 {
     GepubNavPoint *navpoint = g_malloc0 (sizeof (GepubNavPoint));
 
@@ -412,6 +436,9 @@ gepub_parse_navpoint (xmlNodePtr node, const gchar *basepath)
         g_ascii_string_to_unsigned (order, 10, 0, INT_MAX,
                                     &navpoint->playorder, NULL);
         g_free (order);
+    } else {
+        (*playorder)++;
+        navpoint->playorder = *playorder;
     }
 
     xmlNodePtr navchilds = node->children;
@@ -426,13 +453,11 @@ gepub_parse_navpoint (xmlNodePtr node, const gchar *basepath)
             gchar **split;
             gchar *tmpuri;
             tmpuri = gepub_utils_get_prop (navchilds, "src");
-            // removing # params. Maybe we should store the # params in the
-            // navpoint to use in the future if the doc references to a position
-            // inside the chapter
             split = g_strsplit (tmpuri, "#", -1);
 
-            // adding the base path
-            navpoint->content = g_strdup_printf ("%s%s", basepath, split[0]);
+            navpoint->content = g_strdup_printf ("%s%s", doc->content_base, split[0]);
+            navpoint->params = g_strdup(split[1]);
+            navpoint->chapter = gepub_doc_resource_uri_to_chapter (doc, navpoint->content);
 
             g_strfreev (split);
             g_free (tmpuri);
@@ -442,7 +467,9 @@ gepub_parse_navpoint (xmlNodePtr node, const gchar *basepath)
                 navpoint->label = g_strdup ((gchar *)text->children->content);
             }
         } else if (gepub_utils_element_is_a(navchilds, "navPoint")) {
-            navpoint->children = g_list_prepend(navpoint->children, gepub_parse_navpoint(navchilds, basepath));
+            GepubNavPoint *navpoint_child = gepub_parse_navpoint(doc, navchilds, playorder);
+            navpoint->children = g_list_prepend(navpoint->children, navpoint_child);
+            doc->toc_flat = g_list_prepend(doc->toc_flat, navpoint_child);
         }
 
         navchilds = navchilds->next;
@@ -766,7 +793,24 @@ gepub_doc_set_chapter_internal (GepubDoc *doc,
         return FALSE;
 
     doc->chapter = chapter;
+    // printf("%s: %s\n", __FUNCTION__, (gchar *)chapter->data);
     g_object_notify_by_pspec (G_OBJECT (doc), properties[PROP_CHAPTER]);
+
+    return TRUE;
+}
+
+static gboolean
+gepub_doc_set_chapter_virtual_internal (GepubDoc *doc,
+                                        GList    *toc_chapter_virtual)
+{
+    if (!toc_chapter_virtual || doc->toc_flat_chapter_virtual == toc_chapter_virtual)
+        return FALSE;
+
+    GepubNavPoint *navpoint = toc_chapter_virtual->data;
+
+    doc->toc_flat_chapter_virtual = toc_chapter_virtual;
+    gepub_doc_set_chapter (doc, navpoint->chapter);
+    g_object_notify_by_pspec (G_OBJECT (doc), properties[PROP_CHAPTER_VIRTUAL]);
 
     return TRUE;
 }
@@ -802,6 +846,38 @@ gepub_doc_go_prev (GepubDoc *doc)
 }
 
 /**
+ * gepub_doc_go_next_virtual:
+ * @doc: a #GepubDoc
+ *
+ * Returns: TRUE on success, FALSE if there's no next virtual chapter as seen by
+ * the reader
+ */
+gboolean
+gepub_doc_go_next_virtual (GepubDoc *doc)
+{
+    g_return_val_if_fail (GEPUB_IS_DOC (doc), FALSE);
+    g_return_val_if_fail (doc->toc_flat_chapter_virtual != NULL, FALSE);
+
+    return gepub_doc_set_chapter_virtual_internal (doc, doc->toc_flat_chapter_virtual->next);
+}
+
+/**
+ * gepub_doc_go_prev_virtual:
+ * @doc: a #GepubDoc
+ *
+ * Returns: TRUE on success, FALSE if there's no previous virtual chapter as
+ * seen by the reader
+ */
+gboolean
+gepub_doc_go_prev_virtual (GepubDoc *doc)
+{
+    g_return_val_if_fail (GEPUB_IS_DOC (doc), FALSE);
+    g_return_val_if_fail (doc->toc_flat_chapter_virtual != NULL, FALSE);
+
+    return gepub_doc_set_chapter_virtual_internal (doc, doc->toc_flat_chapter_virtual->prev);
+}
+
+/**
  * gepub_doc_get_n_chapters:
  * @doc: a #GepubDoc
  *
@@ -813,6 +889,20 @@ gepub_doc_get_n_chapters (GepubDoc *doc)
     g_return_val_if_fail (GEPUB_IS_DOC (doc), 0);
 
     return g_list_length (doc->spine);
+}
+
+/**
+ * gepub_doc_get_n_chapters_virtual:
+ * @doc: a #GepubDoc
+ *
+ * Returns: the number of virtual chapters in the document as seen by the reader
+ */
+int
+gepub_doc_get_n_chapters_virtual (GepubDoc *doc)
+{
+    g_return_val_if_fail (GEPUB_IS_DOC (doc), 0);
+
+    return g_list_length (doc->toc_flat);
 }
 
 /**
@@ -832,6 +922,22 @@ gepub_doc_get_chapter (GepubDoc *doc)
 }
 
 /**
+ * gepub_doc_get_chapter_virtual:
+ * @doc: a #GepubDoc
+ *
+ * Returns: the current playorder index, starting from 0
+ */
+int
+gepub_doc_get_chapter_virtual (GepubDoc *doc)
+{
+    g_return_val_if_fail (GEPUB_IS_DOC (doc), 0);
+    g_return_val_if_fail (doc->toc_flat != NULL, 0);
+    g_return_val_if_fail (doc->toc_flat_chapter_virtual != NULL, 0);
+
+    return g_list_position (doc->toc_flat, doc->toc_flat_chapter_virtual);
+}
+
+/**
  * gepub_doc_set_chapter:
  * @doc: a #GepubDoc
  * @index: the index of the new chapter
@@ -840,7 +946,7 @@ gepub_doc_get_chapter (GepubDoc *doc)
  */
 void
 gepub_doc_set_chapter (GepubDoc *doc,
-                    gint      index)
+                       gint      index)
 {
     GList *chapter;
 
@@ -850,6 +956,27 @@ gepub_doc_set_chapter (GepubDoc *doc,
 
     chapter = g_list_nth (doc->spine, index);
     gepub_doc_set_chapter_internal (doc, chapter);
+}
+
+/**
+ * gepub_doc_set_chapter_virtual:
+ * @doc: a #GepubDoc
+ * @index: the index of the new virtual chapter (= playorder)
+ *
+ * Sets the document current virtual chapter as seen by the reader to @index
+ */
+void
+gepub_doc_set_chapter_virtual (GepubDoc *doc,
+                               gint      index)
+{
+    GList *toc_chapter_virtual;
+
+    g_return_if_fail (GEPUB_IS_DOC (doc));
+
+    g_return_if_fail (index >= 0 && index <= gepub_doc_get_n_chapters_virtual (doc));
+
+    toc_chapter_virtual = g_list_nth (doc->toc_flat, index);
+    gepub_doc_set_chapter_virtual_internal (doc, toc_chapter_virtual);
 }
 
 /**
